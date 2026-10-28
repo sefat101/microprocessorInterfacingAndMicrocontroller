@@ -1,0 +1,90 @@
+/**
+ * UART SWITCH MASTER — Pure Bare Metal — NUCLEO-F446RE
+ * Flash THIS project to the MASTER board (the one you press).
+ *
+ * DEMO:
+ *   Press the blue USER button (PC13) on the master
+ *     → master sends 'S' to the slave
+ *     → SLAVE blinks its LED 5×
+ *     → slave replies 'D' (ack)
+ *     → MASTER gives a little 2-blink to confirm the ack
+ *   Idle (no press): both boards dark.
+ *
+ * WIRING (2 wires + GND):  Master PA9(TX)→Slave PA10(RX),
+ *                          Master PA10(RX)←Slave PA9(TX),  GND↔GND
+ * LED: PA5 (LD2)   BUTTON: PC13 (USER, active-low)   LINK: USART1 @ 9600
+ */
+
+#define RCC_AHB1ENR  (*(volatile unsigned int *)0x40023830)
+#define RCC_APB2ENR  (*(volatile unsigned int *)0x40023844)
+#define GPIOA_MODER  (*(volatile unsigned int *)0x40020000)
+#define GPIOA_PUPDR  (*(volatile unsigned int *)0x4002000C)
+#define GPIOA_ODR    (*(volatile unsigned int *)0x40020014)
+#define GPIOA_AFRH   (*(volatile unsigned int *)0x40020024)
+#define GPIOC_PUPDR  (*(volatile unsigned int *)0x4002080C)
+#define GPIOC_IDR    (*(volatile unsigned int *)0x40020810)
+#define USART1_SR    (*(volatile unsigned int *)0x40011000)
+#define USART1_DR    (*(volatile unsigned int *)0x40011004)
+#define USART1_BRR   (*(volatile unsigned int *)0x40011008)
+#define USART1_CR1   (*(volatile unsigned int *)0x4001100C)
+
+void SystemInit(void) __attribute__((weak));        void SystemInit(void) { }
+void __libc_init_array(void) __attribute__((weak)); void __libc_init_array(void) { }
+
+static void delay_ms(unsigned int ms) {
+    for (unsigned int m = 0; m < ms; m++)
+        for (volatile unsigned int i = 0; i < 1300; i++);
+}
+
+/* USER button on PC13 is active-low: pressed reads 0. */
+static int pressed(void) { return (GPIOC_IDR & (1 << 13)) == 0; }
+
+/* Master's "little" acknowledge: 2 short blinks */
+static void blink_little(void) {
+    for (int i = 0; i < 2; i++) {
+        GPIOA_ODR |=  (1 << 5);  delay_ms(120);
+        GPIOA_ODR &= ~(1 << 5);  delay_ms(120);
+    }
+}
+
+int main(void)
+{
+    RCC_AHB1ENR |= (1 << 0) | (1 << 2);   /* GPIOA + GPIOC */
+    RCC_APB2ENR |= (1 << 4);              /* USART1        */
+
+    GPIOA_MODER &= ~(3 << 10);  GPIOA_MODER |= (1 << 10);      /* PA5 LED */
+    GPIOA_MODER &= ~((3 << 18) | (3 << 20));                   /* PA9/PA10 AF */
+    GPIOA_MODER |=  ((2 << 18) | (2 << 20));
+    GPIOA_AFRH  &= ~((0xF << 4) | (0xF << 8));
+    GPIOA_AFRH  |=  ((7 << 4) | (7 << 8));
+    GPIOA_PUPDR &= ~(3 << 20);  GPIOA_PUPDR |= (1 << 20);      /* RX pull-up  */
+
+    GPIOC_PUPDR &= ~(3 << 26);  GPIOC_PUPDR |= (1 << 26);      /* PC13 pull-up */
+
+    USART1_BRR = 0x0683;                        /* 9600 @ 16MHz */
+    USART1_CR1 = (1 << 13) | (1 << 3) | (1 << 2);
+
+    int prev = 0;
+    while (1) {
+        int now = pressed();
+
+        if (now && !prev) {                     /* button just pressed */
+            delay_ms(20);                        /* debounce */
+            if (pressed()) {
+                (void)USART1_SR; (void)USART1_DR;    /* clear stale RX */
+                while (!(USART1_SR & (1 << 7)));      /* TXE */
+                USART1_DR = 'S';                      /* trigger slave */
+
+                /* wait for slave's ack 'D' (timeout so we never hang) */
+                unsigned int t = 6000; int got = 0;
+                while (t) {
+                    if (USART1_SR & (1 << 5)) { if ((char)USART1_DR == 'D') got = 1; break; }
+                    delay_ms(1); t--;
+                }
+                if (got) blink_little();             /* confirm the ack */
+            }
+        }
+        prev = now;
+        delay_ms(5);                             /* poll rate */
+    }
+}
